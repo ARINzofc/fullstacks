@@ -15,7 +15,7 @@
 
 #define DHTTYPE DHT22
 #define LED_COUNT 1
-#define GAS_THRESHOLD 1800
+#define GAS_THRESHOLD 2500
 
 Servo scanServo;
 WebServer server(80);
