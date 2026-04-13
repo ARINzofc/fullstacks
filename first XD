@@ -9,15 +9,18 @@
 #define PIR_PIN     27
 #define RELAY_PIN   25
 #define SERVO_PIN   14
+#define SERVO2_PIN  33
 #define BUZZER_PIN  12
 #define LED_PIN     13
 #define DHT_PIN     26
 
-#define DHTTYPE DHT22
+#define DHTTYPE DHT11
 #define LED_COUNT 1
 #define GAS_THRESHOLD 2500
 
 Servo scanServo;
+Servo waterServo;
+
 WebServer server(80);
 Adafruit_NeoPixel pixel(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 DHT dht(DHT_PIN, DHTTYPE);
@@ -32,30 +35,67 @@ float humidity = 0;
 const char* ap_ssid = "ESP32_FIRE_SYSTEM";
 const char* ap_password = "12345678";
 
+int angle = 0;
+int direction = 1;
+unsigned long lastMove = 0;
+unsigned long lastDHT = 0;
+
 void setLED(uint8_t r, uint8_t g, uint8_t b) {
   pixel.setPixelColor(0, pixel.Color(r, g, b));
   pixel.show();
 }
 
+bool isFlameDetected() {
+  return digitalRead(FLAME_PIN) == LOW;
+}
+
 void handleRoot() {
+
+  String status = "SAFE";
+  String color = "#3498db";
+
+  if (flameDetected && humanDetected) {
+    status = "DANGER";
+    color = "#8e44ad";
+  }
+  else if (flameDetected) {
+    status = "FIRE";
+    color = "#e74c3c";
+  }
+  else if (gasDetected) {
+    status = "GAS";
+    color = "#f1c40f";
+  }
 
   String page = "<html><head>";
   page += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  page += "<meta http-equiv='refresh' content='2'>";
+
   page += "<style>";
-  page += "body{font-family:Arial;text-align:center;background:#f4f4f4}";
-  page += "h2{color:red}";
-  page += ".box{background:white;padding:20px;margin:20px;border-radius:10px}";
+  page += "body{margin:0;font-family:sans-serif;background:#f5f7fa}";
+  page += ".header{background:linear-gradient(135deg,#2c3e50,#4ca1af);color:white;padding:18px;font-size:20px;font-weight:bold}";
+  page += ".status{display:inline-block;margin:20px;padding:10px 25px;border-radius:50px;color:white;font-size:16px}";
+  page += ".grid{display:flex;flex-wrap:wrap;justify-content:center}";
+  page += ".card{background:white;width:140px;margin:10px;padding:15px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,0.1);transition:0.2s}";
+  page += ".card:hover{transform:scale(1.05)}";
+  page += ".title{font-size:14px;color:#888}";
+  page += ".value{font-size:18px;font-weight:bold;margin-top:5px}";
   page += "</style></head><body>";
 
-  page += "<h2>ESP32 Fire Detection System</h2>";
+  page += "<div class='header'>Fire Detection System</div>";
 
-  page += "<div class='box'>";
-  page += "<b>Flame:</b> " + String(flameDetected ? "YES" : "NO") + "<br>";
-  page += "<b>Gas:</b> " + String(gasDetected ? "YES" : "NO") + "<br>";
-  page += "<b>Human:</b> " + String(humanDetected ? "YES" : "NO") + "<br>";
-  page += "<b>Temperature:</b> " + String(temperature) + " C<br>";
-  page += "<b>Humidity:</b> " + String(humidity) + " %<br>";
-  page += "<b>Pump:</b> " + String(digitalRead(RELAY_PIN) ? "ON" : "OFF") + "<br>";
+  page += "<div class='status' style='background:" + color + "'>";
+  page += status;
+  page += "</div>";
+
+  page += "<div class='grid'>";
+  page += "<div class='card'><div class='title'>Flame</div><div class='value'>" + String(flameDetected ? "YES" : "NO") + "</div></div>";
+  page += "<div class='card'><div class='title'>Gas</div><div class='value'>" + String(gasDetected ? "YES" : "NO") + "</div></div>";
+  page += "<div class='card'><div class='title'>Human</div><div class='value'>" + String(humanDetected ? "YES" : "NO") + "</div></div>";
+  page += "<div class='card'><div class='title'>Temp</div><div class='value'>" + String(temperature) + "°C</div></div>";
+  page += "<div class='card'><div class='title'>Humidity</div><div class='value'>" + String(humidity) + "%</div></div>";
+  page += "<div class='card'><div class='title'>Pump</div><div class='value'>" + String(digitalRead(RELAY_PIN) ? "ON" : "OFF") + "</div></div>";
+  page += "<div class='card'><div class='title'>Buzzer</div><div class='value'>" + String(digitalRead(BUZZER_PIN) ? "ON" : "OFF") + "</div></div>";
   page += "</div>";
 
   page += "</body></html>";
@@ -64,7 +104,6 @@ void handleRoot() {
 }
 
 void setup() {
-
   Serial.begin(115200);
 
   pinMode(FLAME_PIN, INPUT);
@@ -76,16 +115,17 @@ void setup() {
   digitalWrite(BUZZER_PIN, LOW);
 
   scanServo.attach(SERVO_PIN);
+  waterServo.attach(SERVO2_PIN);
 
   pixel.begin();
-  setLED(0,255,0);   
+  setLED(0,255,0);
 
   dht.begin();
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ap_ssid, ap_password);
 
-  Serial.println("Hotspot started");
+  Serial.println("System Started");
   Serial.println(WiFi.softAPIP());
 
   server.on("/", handleRoot);
@@ -98,50 +138,93 @@ void loop() {
 
   humanDetected = digitalRead(PIR_PIN);
 
-  int gasValue = analogRead(GAS_PIN);
+  int gasValue = 0;
+  for(int i=0;i<10;i++) {
+    gasValue += analogRead(GAS_PIN);
+    delay(5);
+  }
+  gasValue /= 10;
   gasDetected = gasValue > GAS_THRESHOLD;
 
-  temperature = dht.readTemperature();
-  humidity = dht.readHumidity();
+  if (millis() - lastDHT >= 2000) {
+    lastDHT = millis();
 
-  if (!flameDetected) {
+    float newTemp = dht.readTemperature();
+    float newHum = dht.readHumidity();
 
-    for(int angle = 0; angle <= 180; angle += 5) {
-
-      scanServo.write(angle);
-      delay(25);
-
-      if(digitalRead(FLAME_PIN) == LOW) {
-        flameDetected = true;
-        break;
-      }
+    if (!isnan(newTemp) && !isnan(newHum)) {
+      temperature = newTemp;
+      humidity = newHum;
     }
   }
 
-  if(digitalRead(FLAME_PIN) == LOW) {
+  Serial.println("----------- SYSTEM DATA -----------");
+  Serial.print("Temperature: "); Serial.println(temperature);
+  Serial.print("Humidity: "); Serial.println(humidity);
+  Serial.print("Gas: "); Serial.print(gasValue);
+  Serial.print(" | Detected: "); Serial.println(gasDetected);
+  Serial.println("----------------------------------\n");
 
-    flameDetected = true;
+  // SERVO (both)
+  if (!flameDetected) {
+    if (millis() - lastMove >= 4) {
+      lastMove = millis();
 
-    digitalWrite(RELAY_PIN, HIGH);  
-    digitalWrite(BUZZER_PIN, HIGH);  
+      scanServo.write(angle);
+      waterServo.write(angle);
 
-    if(humanDetected)
-      setLED(128,0,128);
-    else
-      setLED(255,0,0);  
+      angle += direction * 5;
+
+      if(angle >= 180) { angle = 180; direction = -1; }
+      if(angle <= 0) { angle = 0; direction = 1; }
+    }
+
+    if(isFlameDetected()) {
+      flameDetected = true;
+    }
   }
 
-  if(!flameDetected && gasDetected) {
+  // 🔥 FULL COMBINATION LOGIC
+  bool flameNow = isFlameDetected();
 
+  if (flameNow && gasDetected && humanDetected) {
+    setLED(255,255,255);   // extreme
     digitalWrite(BUZZER_PIN, HIGH);
-    setLED(255,255,0); 
+    digitalWrite(RELAY_PIN, HIGH);
   }
-
-  if(!flameDetected && !gasDetected) {
-
+  else if (flameNow && gasDetected) {
+    setLED(180,0,0);
+    digitalWrite(BUZZER_PIN, HIGH);
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+  else if (flameNow && humanDetected) {
+    setLED(128,0,128);
+    digitalWrite(BUZZER_PIN, HIGH);
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+  else if (flameNow) {
+    setLED(255,0,0);
+    digitalWrite(BUZZER_PIN, HIGH);
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+  else if (gasDetected && humanDetected) {
+    setLED(255,165,0);
+    digitalWrite(BUZZER_PIN, HIGH);
+  }
+  else if (gasDetected) {
+    setLED(255,255,0);
+    digitalWrite(BUZZER_PIN, HIGH);
+  }
+  else if (humanDetected) {
+    setLED(0,255,0);
     digitalWrite(BUZZER_PIN, LOW);
-    setLED(0,0,255); 
+  }
+  else {
+    setLED(0,0,255);
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(RELAY_PIN, LOW);
+    flameDetected = false;
   }
 
-  delay(200);
+  delay(300);
 }
